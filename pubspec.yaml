@@ -1,0 +1,20 @@
+name: native_iap
+description: Reusable in-app purchase library using native StoreKit (iOS) and BillingClient (Android) via method channels.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ">=3.2.0 <4.0.0"
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.em.native_iap
+        pluginClass: NativeIapPlugin
+      ios:
+        pluginClass: NativeIapPlugin
+
+dependencies:
+  flutter:
+    sdk: flutter
