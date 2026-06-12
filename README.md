@@ -29,11 +29,11 @@ Run `flutter pub get`.
 ```dart
 import 'package:native_iap/native_iap.dart';
 
-// One-time setup (e.g. in your payment controller or main)
-final nativeIap = NativeIapChannel();
+// One-time setup (e.g. in main) — use the shared singleton everywhere
+final nativeIap = NativeIapChannel.instance;
 nativeIap.install();
 
-// Listen for events
+// Listen for events (same instance from any screen/widget)
 nativeIap.events.listen((event) {
   switch (event) {
     case NativeIapPurchaseComplete(:final result):

@@ -6,12 +6,17 @@ import 'package:native_iap/src/native_iap_models.dart';
 
 /// Reusable client for native in-app purchase via method channel.
 ///
-/// Call [install] once (e.g. from your payment controller or main),
-/// then use [purchaseSubscription], [purchaseSubscriptionOffer], etc.
+/// Use [instance] everywhere in the app so native events are delivered to one
+/// handler. Call [install] once (e.g. from main), then use purchase/fetch APIs.
 /// Subscribe to [events] to receive completion/failure/restore callbacks.
 class NativeIapChannel {
-  NativeIapChannel({String? channelName})
+  NativeIapChannel._({String? channelName})
       : _channel = MethodChannel(channelName ?? kNativeIapChannelName);
+
+  static NativeIapChannel? _instance;
+
+  /// Shared app-wide instance. Native allows only one method-call handler.
+  static NativeIapChannel get instance => _instance ??= NativeIapChannel._();
 
   final MethodChannel _channel;
   final StreamController<NativeIapEvent> _eventController =
@@ -165,8 +170,15 @@ class NativeIapChannel {
     await _channel.invokeMethod(NativeIapMethods.restorePurchases);
   }
 
-  /// Release the event stream. Call when shutting down.
+  /// Release the event stream. Intended for tests; prefer keeping [instance] alive.
   void dispose() {
-    _eventController.close();
+    if (!_eventController.isClosed) {
+      _eventController.close();
+    }
+    _channel.setMethodCallHandler(null);
+    _installed = false;
+    if (identical(_instance, this)) {
+      _instance = null;
+    }
   }
 }
