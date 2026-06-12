@@ -1,3 +1,75 @@
+/// A subscription offer / base plan (primarily Android; iOS uses product-level pricing).
+class NativeIapSubscriptionOffer {
+  const NativeIapSubscriptionOffer({
+    required this.basePlanId,
+    this.offerId,
+    required this.price,
+    required this.rawPrice,
+    required this.currencyCode,
+    this.billingPeriod,
+    this.offerToken,
+  });
+
+  factory NativeIapSubscriptionOffer.fromMap(Map<Object?, Object?> map) {
+    final m = Map<String, dynamic>.from(map as Map);
+    return NativeIapSubscriptionOffer(
+      basePlanId: m['basePlanId'] as String? ?? '',
+      offerId: m['offerId'] as String?,
+      price: m['price'] as String? ?? '',
+      rawPrice: (m['rawPrice'] as num?)?.toDouble() ?? 0,
+      currencyCode: m['currencyCode'] as String? ?? '',
+      billingPeriod: m['billingPeriod'] as String?,
+      offerToken: m['offerToken'] as String?,
+    );
+  }
+
+  final String basePlanId;
+  final String? offerId;
+  final String price;
+  final double rawPrice;
+  final String currencyCode;
+  final String? billingPeriod;
+  final String? offerToken;
+}
+
+/// Store product metadata returned by [NativeIapChannel.fetchProducts].
+class NativeIapProduct {
+  const NativeIapProduct({
+    required this.productId,
+    required this.title,
+    required this.description,
+    required this.price,
+    required this.rawPrice,
+    required this.currencyCode,
+    this.subscriptionOffers = const [],
+  });
+
+  factory NativeIapProduct.fromMap(Map<Object?, Object?> map) {
+    final m = Map<String, dynamic>.from(map as Map);
+    final offersRaw = m['subscriptionOffers'] as List<Object?>? ?? [];
+    return NativeIapProduct(
+      productId: m['productId'] as String? ?? '',
+      title: m['title'] as String? ?? '',
+      description: m['description'] as String? ?? '',
+      price: m['price'] as String? ?? '',
+      rawPrice: (m['rawPrice'] as num?)?.toDouble() ?? 0,
+      currencyCode: m['currencyCode'] as String? ?? '',
+      subscriptionOffers: offersRaw
+          .map(
+            (e) => NativeIapSubscriptionOffer.fromMap(e as Map<Object?, Object?>),
+          )
+          .toList(),
+    );
+  }
+
+  final String productId;
+  final String title;
+  final String description;
+  final String price;
+  final double rawPrice;
+  final String currencyCode;
+  final List<NativeIapSubscriptionOffer> subscriptionOffers;
+}
 
 /// Result of a completed purchase (iOS receipt or Android purchase token).
 class PurchaseCompleteResult {

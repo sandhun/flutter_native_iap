@@ -5,8 +5,16 @@ import UIKit
 public class NativeIapPlugin: NSObject, FlutterPlugin, SKProductsRequestDelegate, SKPaymentTransactionObserver {
     private static let channelName = "com.example.native_iap"
 
+    private enum RequestMode {
+        case purchase
+        case promotional
+        case fetch
+    }
+
+    private var requestMode: RequestMode = .purchase
     private var purchaseType = "regular"
     private var currentProductId: String?
+    private var fetchResult: FlutterResult?
     private var currentApplicationUsername: String?
     private var currentOfferDetails: (
         offerId: String,
@@ -39,6 +47,7 @@ public class NativeIapPlugin: NSObject, FlutterPlugin, SKProductsRequestDelegate
                 return
             }
             let applicationUsername = args["applicationUsername"] as? String
+            requestMode = .purchase
             purchaseType = "regular"
             currentProductId = productId
             currentApplicationUsername = applicationUsername
@@ -60,6 +69,7 @@ public class NativeIapPlugin: NSObject, FlutterPlugin, SKProductsRequestDelegate
                 return
             }
             let applicationUsername = args["applicationUsername"] as? String
+            requestMode = .promotional
             purchaseType = "promotional"
             currentProductId = productId
             currentApplicationUsername = applicationUsername
@@ -90,6 +100,23 @@ public class NativeIapPlugin: NSObject, FlutterPlugin, SKProductsRequestDelegate
             SKPaymentQueue.default().restoreCompletedTransactions()
             result(true)
 
+        case "fetchProducts":
+            guard let args = call.arguments as? [String: Any],
+                  let productIds = args["productIds"] as? [String],
+                  !productIds.isEmpty else {
+                result(FlutterError(code: "INVALID_ARGS", message: "productIds required", details: nil))
+                return
+            }
+            if fetchResult != nil {
+                result(FlutterError(code: "IN_PROGRESS", message: "Product fetch already in progress", details: nil))
+                return
+            }
+            requestMode = .fetch
+            fetchResult = result
+            let request = SKProductsRequest(productIdentifiers: Set(productIds))
+            request.delegate = self
+            request.start()
+
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -98,6 +125,28 @@ public class NativeIapPlugin: NSObject, FlutterPlugin, SKProductsRequestDelegate
     // MARK: - SKProductsRequestDelegate
 
     public func productsRequest(_ request: SKProductsRequest, didReceive response: SKProductsResponse) {
+        if requestMode == .fetch {
+            let products = response.products.map { product -> [String: Any] in
+                let formatter = NumberFormatter()
+                formatter.numberStyle = .currency
+                formatter.locale = product.priceLocale
+                let price = formatter.string(from: product.price) ?? "\(product.price)"
+                return [
+                    "productId": product.productIdentifier,
+                    "title": product.localizedTitle,
+                    "description": product.localizedDescription,
+                    "price": price,
+                    "rawPrice": product.price.doubleValue,
+                    "currencyCode": product.priceLocale.currencyCode ?? "",
+                    "subscriptionOffers": [] as [[String: Any]],
+                ]
+            }
+            fetchResult?(products)
+            fetchResult = nil
+            requestMode = .purchase
+            return
+        }
+
         guard let product = response.products.first else {
             flutterChannel?.invokeMethod("onPurchaseFailed", arguments: ["error": "Product not found"])
             return
@@ -118,6 +167,25 @@ public class NativeIapPlugin: NSObject, FlutterPlugin, SKProductsRequestDelegate
         currentProductId = nil
         currentApplicationUsername = nil
         if purchaseType == "promotional" { currentOfferDetails = nil }
+        purchaseType = "regular"
+    }
+
+    public func request(_ request: SKRequest, didFailWithError error: Error) {
+        if requestMode == .fetch {
+            fetchResult?(FlutterError(code: "FETCH_FAILED", message: error.localizedDescription, details: nil))
+            fetchResult = nil
+            requestMode = .purchase
+            return
+        }
+
+        flutterChannel?.invokeMethod("onPurchaseFailed", arguments: [
+            "error": error.localizedDescription,
+            "productId": currentProductId as Any,
+        ])
+        currentProductId = nil
+        currentApplicationUsername = nil
+        currentOfferDetails = nil
+        requestMode = .purchase
         purchaseType = "regular"
     }
 

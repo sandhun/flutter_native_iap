@@ -139,6 +139,22 @@ class NativeIapChannel {
     await _channel.invokeMethod(NativeIapMethods.applyPromotionalOffer, args);
   }
 
+  /// Fetch subscription product metadata (title, price, base plans, etc.).
+  Future<List<NativeIapProduct>> fetchProducts({
+    required List<String> productIds,
+  }) async {
+    if (productIds.isEmpty) return const [];
+
+    final result = await _channel.invokeMethod<List<Object?>>(
+      NativeIapMethods.fetchProducts,
+      {'productIds': productIds},
+    );
+
+    return (result ?? [])
+        .map((e) => NativeIapProduct.fromMap(e as Map<Object?, Object?>))
+        .toList();
+  }
+
   /// Open platform subscription management (App Store / Play Store).
   Future<void> openSubscriptionSettings() async {
     await _channel.invokeMethod(NativeIapMethods.openSubscriptionSettings);

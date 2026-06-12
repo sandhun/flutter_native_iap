@@ -156,6 +156,20 @@ class NativeIapPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Purchas
                     }
                 }
             }
+            "fetchProducts" -> {
+                val productIds = call.argument<List<String>>("productIds")
+                if (productIds.isNullOrEmpty()) {
+                    result.error("ERROR", "productIds required", null)
+                    return
+                }
+                scope.launch {
+                    try {
+                        result.success(fetchProducts(productIds))
+                    } catch (e: Exception) {
+                        result.error("ERROR", "Failed to fetch products", e.message)
+                    }
+                }
+            }
             else -> result.notImplemented()
         }
     }
@@ -326,6 +340,62 @@ class NativeIapPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Purchas
         val flowResult = billingClient.launchBillingFlow(act, flowParams)
         flowResult.responseCode == BillingClient.BillingResponseCode.OK
     }
+
+    private suspend fun fetchProducts(productIds: List<String>): List<Map<String, Any?>> =
+        withContext(Dispatchers.IO) {
+            val queryParams = QueryProductDetailsParams.newBuilder()
+                .setProductList(
+                    productIds.map { productId ->
+                        QueryProductDetailsParams.Product.newBuilder()
+                            .setProductId(productId)
+                            .setProductType(BillingClient.ProductType.SUBS)
+                            .build()
+                    }
+                )
+                .build()
+
+            val (billingResult, productDetailsList) =
+                suspendCoroutine<Pair<BillingResult, List<ProductDetails>>> { cont ->
+                    billingClient.queryProductDetailsAsync(queryParams) { result, list ->
+                        cont.resume(result to (list ?: emptyList()))
+                    }
+                }
+
+            if (billingResult.responseCode != BillingClient.BillingResponseCode.OK) {
+                throw Exception(billingResult.debugMessage)
+            }
+
+            productDetailsList.map { details ->
+                val offers = details.subscriptionOfferDetails?.map { offer ->
+                    val phase = offer.pricingPhases.pricingPhaseList.firstOrNull()
+                    mapOf(
+                        "basePlanId" to offer.basePlanId,
+                        "offerId" to offer.offerId,
+                        "offerToken" to offer.offerToken,
+                        "price" to (phase?.formattedPrice ?: ""),
+                        "rawPrice" to ((phase?.priceAmountMicros ?: 0L) / 1_000_000.0),
+                        "currencyCode" to (phase?.priceCurrencyCode ?: ""),
+                        "billingPeriod" to phase?.billingPeriod,
+                    )
+                } ?: emptyList()
+
+                val primaryPhase = details.subscriptionOfferDetails
+                    ?.firstOrNull()
+                    ?.pricingPhases
+                    ?.pricingPhaseList
+                    ?.firstOrNull()
+
+                mapOf(
+                    "productId" to details.productId,
+                    "title" to details.name,
+                    "description" to details.description,
+                    "price" to (primaryPhase?.formattedPrice ?: ""),
+                    "rawPrice" to ((primaryPhase?.priceAmountMicros ?: 0L) / 1_000_000.0),
+                    "currencyCode" to (primaryPhase?.priceCurrencyCode ?: ""),
+                    "subscriptionOffers" to offers,
+                )
+            }
+        }
 
     private suspend fun restorePurchases() = withContext(Dispatchers.IO) {
         val params = QueryPurchaseHistoryParams.newBuilder()

@@ -3,7 +3,7 @@ Pod::Spec.new do |s|
   s.version          = '1.0.0'
   s.summary          = 'Native in-app purchase plugin (StoreKit / BillingClient) via method channel'
   s.description      = 'Reusable in-app purchase library using native StoreKit (iOS) and BillingClient (Android) via method channels.'
-  s.homepage         = 'https://github.com/em/native_iap'
+  s.homepage         = 'https://github.com/sandhun/flutter_native_iap'
   s.license          = { :file => '../LICENSE' }
   s.author           = { 'Sandhun Senavirathna' => 'sandhun.emedia@gmail.com' }
   s.source           = { :path => '.' }

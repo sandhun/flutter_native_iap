@@ -10,6 +10,7 @@ abstract final class NativeIapMethods {
   static const String applyPromotionalOffer = 'applyPromotionalOffer';
   static const String openSubscriptionSettings = 'openSubscriptionSettings';
   static const String restorePurchases = 'restorePurchases';
+  static const String fetchProducts = 'fetchProducts';
 }
 
 

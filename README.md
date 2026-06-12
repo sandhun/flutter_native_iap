@@ -55,6 +55,15 @@ nativeIap.events.listen((event) {
   }
 });
 
+// Fetch product metadata for your paywall
+final products = await nativeIap.fetchProducts(
+  productIds: ['com.example.subscription'],
+);
+for (final product in products) {
+  // product.title, product.price, product.currencyCode
+  // Android: product.subscriptionOffers (basePlanId, offerId, price, ...)
+}
+
 // Purchase (iOS: productId only; Android: productId + basePlanId)
 await nativeIap.purchaseSubscription(
   productId: 'com.example.subscription',
@@ -79,6 +88,7 @@ await nativeIap.restorePurchases();
 
 | Dart → Native        | Description                    |
 |----------------------|--------------------------------|
+| `fetchProducts` | Query subscription metadata for product IDs |
 | `purchaseSubscription` | Start subscription (productId; Android: basePlanId) |
 | `purchaseSubscriptionOffer` | Start subscription with offer (Android) |
 | `applyPromotionalOffer` | iOS promotional offer (signature from backend) |
