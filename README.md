@@ -29,9 +29,11 @@ Run `flutter pub get`.
 ```dart
 import 'package:native_iap/native_iap.dart';
 
-// One-time setup (e.g. in main) — use the shared singleton everywhere
+// One-time setup in main — installs handler and fetches products into cache
 final nativeIap = NativeIapChannel.instance;
-nativeIap.install();
+await nativeIap.install(
+  productIds: ['com.example.subscription'],
+);
 
 // Listen for events (same instance from any screen/widget)
 nativeIap.events.listen((event) {
@@ -55,14 +57,16 @@ nativeIap.events.listen((event) {
   }
 });
 
-// Fetch product metadata for your paywall
-final products = await nativeIap.fetchProducts(
-  productIds: ['com.example.subscription'],
-);
-for (final product in products) {
-  // product.title, product.price, product.currencyCode
-  // Android: product.subscriptionOffers (basePlanId, offerId, price, ...)
-}
+// Any view can read cached products (no extra fetch call)
+final products = nativeIap.products;
+final subscription = nativeIap.productById('com.example.subscription');
+// subscription?.title, subscription?.price
+
+// Or wait / listen for the first load
+await nativeIap.productsReady;
+nativeIap.productsStream.listen((products) {
+  // rebuild paywall when products refresh
+});
 
 // Purchase (iOS: productId only; Android: productId + basePlanId)
 await nativeIap.purchaseSubscription(
@@ -88,7 +92,9 @@ await nativeIap.restorePurchases();
 
 | Dart → Native        | Description                    |
 |----------------------|--------------------------------|
-| `fetchProducts` | Query subscription metadata for product IDs |
+| `install` | Install handler and fetch/cache product IDs |
+| `refreshProducts` | Re-fetch products configured in `install` |
+| `products` / `productsReady` / `productsStream` | Read cached product metadata from any view |
 | `purchaseSubscription` | Start subscription (productId; Android: basePlanId) |
 | `purchaseSubscriptionOffer` | Start subscription with offer (Android) |
 | `applyPromotionalOffer` | iOS promotional offer (signature from backend) |
