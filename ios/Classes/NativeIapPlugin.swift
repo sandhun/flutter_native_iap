@@ -7,6 +7,9 @@ public class NativeIapPlugin: NSObject, FlutterPlugin {
 
     private var flutterChannel: FlutterMethodChannel?
     private var transactionListenerTask: Task<Void, Never>?
+    /// Transaction IDs that have already been emitted to Dart.
+    /// Guarded by @MainActor so the check-and-insert is always atomic.
+    @MainActor private var processedTransactionIDs: Set<UInt64> = []
 
     // MARK: - Registration
 
@@ -222,10 +225,12 @@ public class NativeIapPlugin: NSObject, FlutterPlugin {
         case .success(let verificationResult):
             switch verificationResult {
             case .verified(let transaction):
-                sendEvent("onPurchaseComplete", arguments: [
-                    "productId": transaction.productID,
-                    "receipt": verificationResult.jwsRepresentation,
-                ])
+                if processedTransactionIDs.insert(transaction.id).inserted {
+                    sendEvent("onPurchaseComplete", arguments: [
+                        "productId": transaction.productID,
+                        "receipt": verificationResult.jwsRepresentation,
+                    ])
+                }
                 await transaction.finish()
             case .unverified(let transaction, let verificationError):
                 sendEvent("onPurchaseFailed", arguments: [
@@ -251,11 +256,18 @@ public class NativeIapPlugin: NSObject, FlutterPlugin {
     private func dispatchTransactionUpdate(_ verificationResult: VerificationResult<Transaction>) async {
         switch verificationResult {
         case .verified(let transaction):
-            await MainActor.run {
-                sendEvent("onPurchaseComplete", arguments: [
-                    "productId": transaction.productID,
-                    "receipt": verificationResult.jwsRepresentation,
-                ])
+            // Atomically claim this transaction ID on the main actor.
+            // If handlePurchaseResult already claimed it, we skip the event but still finish.
+            let isNew = await MainActor.run { [weak self] in
+                self?.processedTransactionIDs.insert(transaction.id).inserted ?? false
+            }
+            if isNew {
+                await MainActor.run { [weak self] in
+                    self?.sendEvent("onPurchaseComplete", arguments: [
+                        "productId": transaction.productID,
+                        "receipt": verificationResult.jwsRepresentation,
+                    ])
+                }
             }
             await transaction.finish()
         case .unverified(let transaction, _):
