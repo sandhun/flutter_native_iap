@@ -2,30 +2,13 @@ import Flutter
 import StoreKit
 import UIKit
 
-public class NativeIapPlugin: NSObject, FlutterPlugin, SKProductsRequestDelegate, SKPaymentTransactionObserver {
+public class NativeIapPlugin: NSObject, FlutterPlugin {
     private static let channelName = "com.example.native_iap"
 
-    private enum RequestMode {
-        case purchase
-        case promotional
-        case fetch
-    }
-
-    private var requestMode: RequestMode = .purchase
-    private var purchaseType = "regular"
-    private var currentProductId: String?
-    private var fetchResult: FlutterResult?
-    private var currentApplicationUsername: String?
-    private var currentOfferDetails: (
-        offerId: String,
-        keyIdentifier: String,
-        nonce: UUID,
-        signature: String,
-        timestamp: UInt64,
-        applicationUsername: String?
-    )?
     private var flutterChannel: FlutterMethodChannel?
-    private var resultHolder: FlutterResult?
+    private var transactionListenerTask: Task<Void, Never>?
+
+    // MARK: - Registration
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(
@@ -35,218 +18,288 @@ public class NativeIapPlugin: NSObject, FlutterPlugin, SKProductsRequestDelegate
         let instance = NativeIapPlugin()
         instance.flutterChannel = channel
         registrar.addMethodCallDelegate(instance, channel: channel)
-        SKPaymentQueue.default().add(instance)
+        instance.startTransactionListener()
     }
+
+    /// Listens for transactions that arrive outside of a direct purchase call —
+    /// renewals, family-sharing grants, interrupted purchases, etc.
+    private func startTransactionListener() {
+        transactionListenerTask = Task { [weak self] in
+            for await verificationResult in Transaction.updates {
+                await self?.dispatchTransactionUpdate(verificationResult)
+            }
+        }
+    }
+
+    deinit {
+        transactionListenerTask?.cancel()
+    }
+
+    // MARK: - Method channel dispatch
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
-        case "purchaseSubscription":
-            guard let args = call.arguments as? [String: Any],
-                  let productId = args["productId"] as? String else {
-                result(FlutterError(code: "INVALID_ARGS", message: "productId required", details: nil))
-                return
-            }
-            let applicationUsername = args["applicationUsername"] as? String
-            requestMode = .purchase
-            purchaseType = "regular"
-            currentProductId = productId
-            currentApplicationUsername = applicationUsername
-            let request = SKProductsRequest(productIdentifiers: [productId])
-            request.delegate = self
-            request.start()
-            result(true)
-
-        case "applyPromotionalOffer":
-            guard let args = call.arguments as? [String: Any],
-                  let productId = args["productId"] as? String,
-                  let offerId = args["offerId"] as? String,
-                  let signature = args["signature"] as? String,
-                  let keyIdentifier = args["keyIdentifier"] as? String,
-                  let nonceStr = args["nonce"] as? String,
-                  let nonce = UUID(uuidString: nonceStr),
-                  let timestamp = args["timestamp"] as? Int else {
-                result(FlutterError(code: "INVALID_ARGS", message: "Missing offer parameters", details: nil))
-                return
-            }
-            let applicationUsername = args["applicationUsername"] as? String
-            requestMode = .promotional
-            purchaseType = "promotional"
-            currentProductId = productId
-            currentApplicationUsername = applicationUsername
-            currentOfferDetails = (
-                offerId: offerId,
-                keyIdentifier: keyIdentifier,
-                nonce: nonce,
-                signature: signature,
-                timestamp: UInt64(timestamp),
-                applicationUsername: applicationUsername
-            )
-            let request = SKProductsRequest(productIdentifiers: [productId])
-            request.delegate = self
-            request.start()
-            result(true)
-
-        case "openSubscriptionSettings":
-            if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
-                DispatchQueue.main.async {
-                    UIApplication.shared.open(url, options: [:], completionHandler: nil)
-                }
-                result(true)
-            } else {
-                result(FlutterError(code: "INVALID_URL", message: "Could not create URL", details: nil))
-            }
-
-        case "restorePurchases":
-            SKPaymentQueue.default().restoreCompletedTransactions()
-            result(true)
-
         case "fetchProducts":
-            guard let args = call.arguments as? [String: Any],
-                  let productIds = args["productIds"] as? [String],
-                  !productIds.isEmpty else {
-                result(FlutterError(code: "INVALID_ARGS", message: "productIds required", details: nil))
-                return
-            }
-            if fetchResult != nil {
-                result(FlutterError(code: "IN_PROGRESS", message: "Product fetch already in progress", details: nil))
-                return
-            }
-            requestMode = .fetch
-            fetchResult = result
-            let request = SKProductsRequest(productIdentifiers: Set(productIds))
-            request.delegate = self
-            request.start()
-
+            handleFetchProducts(call, result: result)
+        case "purchaseSubscription":
+            handlePurchaseSubscription(call, result: result)
+        case "applyPromotionalOffer":
+            handleApplyPromotionalOffer(call, result: result)
+        case "openSubscriptionSettings":
+            handleOpenSubscriptionSettings(result: result)
+        case "restorePurchases":
+            handleRestorePurchases(result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
     }
 
-    // MARK: - SKProductsRequestDelegate
+    // MARK: - fetchProducts
 
-    public func productsRequest(_ request: SKProductsRequest, didReceive response: SKProductsResponse) {
-        if requestMode == .fetch {
-            let products = response.products.map { product -> [String: Any] in
-                let formatter = NumberFormatter()
-                formatter.numberStyle = .currency
-                formatter.locale = product.priceLocale
-                let price = formatter.string(from: product.price) ?? "\(product.price)"
-                return [
-                    "productId": product.productIdentifier,
-                    "title": product.localizedTitle,
-                    "description": product.localizedDescription,
-                    "price": price,
-                    "rawPrice": product.price.doubleValue,
-                    "currencyCode": product.priceLocale.currencyCode ?? "",
-                    "subscriptionOffers": [] as [[String: Any]],
-                ]
+    private func handleFetchProducts(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let productIds = args["productIds"] as? [String],
+              !productIds.isEmpty else {
+            result(FlutterError(code: "INVALID_ARGS", message: "productIds required", details: nil))
+            return
+        }
+        Task {
+            do {
+                let products = try await Product.products(for: productIds)
+                let mapped = products.map { mapProduct($0) }
+                await MainActor.run { result(mapped) }
+            } catch {
+                await MainActor.run {
+                    result(FlutterError(
+                        code: "FETCH_FAILED",
+                        message: error.localizedDescription,
+                        details: nil
+                    ))
+                }
             }
-            fetchResult?(products)
-            fetchResult = nil
-            requestMode = .purchase
-            return
         }
+    }
 
-        guard let product = response.products.first else {
-            flutterChannel?.invokeMethod("onPurchaseFailed", arguments: ["error": "Product not found"])
+    private func mapProduct(_ product: Product) -> [String: Any] {
+        let currencyCode = product.priceFormatStyle.currencyCode
+        var offers: [[String: Any]] = []
+        if let intro = product.subscription?.introductoryOffer {
+            offers.append(mapSubscriptionOffer(intro, currencyCode: currencyCode))
+        }
+        for promo in product.subscription?.promotionalOffers ?? [] {
+            offers.append(mapSubscriptionOffer(promo, currencyCode: currencyCode))
+        }
+        return [
+            "productId": product.id,
+            "title": product.displayName,
+            "description": product.description,
+            "price": product.displayPrice,
+            "rawPrice": NSDecimalNumber(decimal: product.price).doubleValue,
+            "currencyCode": currencyCode,
+            "subscriptionOffers": offers,
+        ]
+    }
+
+    private func mapSubscriptionOffer(
+        _ offer: Product.SubscriptionOffer,
+        currencyCode: String
+    ) -> [String: Any] {
+        return [
+            "basePlanId": "",
+            "offerId": offer.id ?? "",
+            "price": offer.displayPrice,
+            "rawPrice": NSDecimalNumber(decimal: offer.price).doubleValue,
+            "currencyCode": currencyCode,
+            "billingPeriod": isoPeriodString(offer.period),
+            "offerToken": "",
+        ]
+    }
+
+    private func isoPeriodString(_ period: Product.SubscriptionPeriod) -> String {
+        let n = period.value
+        switch period.unit {
+        case .day:   return "P\(n)D"
+        case .week:  return "P\(n)W"
+        case .month: return "P\(n)M"
+        case .year:  return "P\(n)Y"
+        @unknown default: return "P\(n)D"
+        }
+    }
+
+    // MARK: - purchaseSubscription
+
+    private func handlePurchaseSubscription(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let productId = args["productId"] as? String else {
+            result(FlutterError(code: "INVALID_ARGS", message: "productId required", details: nil))
             return
         }
-        let payment = SKMutablePayment(product: product)
-        payment.applicationUsername = currentApplicationUsername
-        if purchaseType == "promotional", let offerDetails = currentOfferDetails {
-            let discount = SKPaymentDiscount(
-                identifier: offerDetails.offerId,
-                keyIdentifier: offerDetails.keyIdentifier,
-                nonce: offerDetails.nonce,
-                signature: offerDetails.signature,
-                timestamp: NSNumber(value: offerDetails.timestamp)
+        let applicationUsername = args["applicationUsername"] as? String
+        // Return immediately; outcome arrives as a channel event.
+        result(true)
+        Task { @MainActor [weak self] in
+            await self?.purchaseProduct(
+                productId: productId,
+                applicationUsername: applicationUsername,
+                extraOptions: []
             )
-            payment.paymentDiscount = discount
         }
-        SKPaymentQueue.default().add(payment)
-        currentProductId = nil
-        currentApplicationUsername = nil
-        if purchaseType == "promotional" { currentOfferDetails = nil }
-        purchaseType = "regular"
     }
 
-    public func request(_ request: SKRequest, didFailWithError error: Error) {
-        if requestMode == .fetch {
-            fetchResult?(FlutterError(code: "FETCH_FAILED", message: error.localizedDescription, details: nil))
-            fetchResult = nil
-            requestMode = .purchase
+    // MARK: - applyPromotionalOffer
+
+    private func handleApplyPromotionalOffer(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let productId       = args["productId"]       as? String,
+              let offerId         = args["offerId"]         as? String,
+              let signatureStr    = args["signature"]       as? String,
+              let keyIdentifier   = args["keyIdentifier"]   as? String,
+              let nonceStr        = args["nonce"]           as? String,
+              let nonce           = UUID(uuidString: nonceStr),
+              let timestamp       = args["timestamp"]       as? Int,
+              let signatureData   = Data(base64Encoded: signatureStr) else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing or invalid promotional offer parameters",
+                details: nil
+            ))
             return
         }
-
-        flutterChannel?.invokeMethod("onPurchaseFailed", arguments: [
-            "error": error.localizedDescription,
-            "productId": currentProductId as Any,
-        ])
-        currentProductId = nil
-        currentApplicationUsername = nil
-        currentOfferDetails = nil
-        requestMode = .purchase
-        purchaseType = "regular"
+        let applicationUsername = args["applicationUsername"] as? String
+        result(true)
+        Task { @MainActor [weak self] in
+            let promoOption = Product.PurchaseOption.promotionalOffer(
+                offerID: offerId,
+                keyID: keyIdentifier,
+                nonce: nonce,
+                signature: signatureData,
+                timestamp: timestamp
+            )
+            await self?.purchaseProduct(
+                productId: productId,
+                applicationUsername: applicationUsername,
+                extraOptions: [promoOption]
+            )
+        }
     }
 
-    // MARK: - SKPaymentTransactionObserver
+    // MARK: - Purchase core
 
-    public func paymentQueue(_ queue: SKPaymentQueue, updatedTransactions transactions: [SKPaymentTransaction]) {
-        for transaction in transactions {
-            switch transaction.transactionState {
-            case .purchased:
-                DispatchQueue.main.async { [weak self] in
-                    let receipt = self?.fetchReceipt()
-                    self?.flutterChannel?.invokeMethod("onPurchaseComplete", arguments: [
-                        "productId": transaction.payment.productIdentifier,
-                        "receipt": receipt as Any
-                    ])
+    @MainActor
+    private func purchaseProduct(
+        productId: String,
+        applicationUsername: String?,
+        extraOptions: [Product.PurchaseOption]
+    ) async {
+        do {
+            let products = try await Product.products(for: [productId])
+            guard let product = products.first else {
+                sendEvent("onPurchaseFailed", arguments: [
+                    "error": "Product not found",
+                    "productId": productId,
+                ])
+                return
+            }
+
+            var options = Set(extraOptions)
+            if let username = applicationUsername, let uuid = UUID(uuidString: username) {
+                options.insert(.appAccountToken(uuid))
+            }
+
+            let purchaseResult = try await product.purchase(options: options)
+            await handlePurchaseResult(purchaseResult, productId: productId)
+        } catch {
+            sendEvent("onPurchaseFailed", arguments: [
+                "error": error.localizedDescription,
+                "productId": productId,
+            ])
+        }
+    }
+
+    @MainActor
+    private func handlePurchaseResult(_ purchaseResult: Product.PurchaseResult, productId: String) async {
+        switch purchaseResult {
+        case .success(let verificationResult):
+            switch verificationResult {
+            case .verified(let transaction):
+                sendEvent("onPurchaseComplete", arguments: [
+                    "productId": transaction.productID,
+                    "receipt": verificationResult.jwsRepresentation,
+                ])
+                await transaction.finish()
+            case .unverified(let transaction, let verificationError):
+                sendEvent("onPurchaseFailed", arguments: [
+                    "error": "Verification failed: \(verificationError.localizedDescription)",
+                    "productId": transaction.productID,
+                ])
+                await transaction.finish()
+            }
+        case .userCancelled:
+            sendEvent("onPurchaseFailed", arguments: [
+                "error": "User cancelled",
+                "productId": productId,
+            ])
+        case .pending:
+            sendEvent("onPurchaseDeferred", arguments: ["productId": productId])
+        @unknown default:
+            break
+        }
+    }
+
+    // MARK: - Transaction.updates listener
+
+    private func dispatchTransactionUpdate(_ verificationResult: VerificationResult<Transaction>) async {
+        switch verificationResult {
+        case .verified(let transaction):
+            await MainActor.run {
+                sendEvent("onPurchaseComplete", arguments: [
+                    "productId": transaction.productID,
+                    "receipt": verificationResult.jwsRepresentation,
+                ])
+            }
+            await transaction.finish()
+        case .unverified(let transaction, _):
+            // Finish unverified transactions without surfacing them.
+            await transaction.finish()
+        }
+    }
+
+    // MARK: - restorePurchases
+
+    private func handleRestorePurchases(result: @escaping FlutterResult) {
+        result(true)
+        Task {
+            for await verificationResult in Transaction.currentEntitlements {
+                if case .verified(let transaction) = verificationResult {
+                    await MainActor.run { [weak self] in
+                        self?.sendEvent("onPurchaseRestored", arguments: [
+                            "productId": transaction.productID,
+                            "receipt": verificationResult.jwsRepresentation,
+                        ])
+                    }
                 }
-                SKPaymentQueue.default().finishTransaction(transaction)
-
-            case .failed:
-                let errorMessage = transaction.error?.localizedDescription ?? "Unknown error"
-                DispatchQueue.main.async { [weak self] in
-                    self?.flutterChannel?.invokeMethod("onPurchaseFailed", arguments: [
-                        "error": errorMessage,
-                        "productId": transaction.payment.productIdentifier
-                    ])
-                }
-                SKPaymentQueue.default().finishTransaction(transaction)
-
-            case .restored:
-                DispatchQueue.main.async { [weak self] in
-                    let receipt = self?.fetchReceipt()
-                    self?.flutterChannel?.invokeMethod("onPurchaseRestored", arguments: [
-                        "productId": transaction.original?.payment.productIdentifier ?? "",
-                        "receipt": receipt as Any
-                    ])
-                }
-                SKPaymentQueue.default().finishTransaction(transaction)
-
-            case .deferred:
-                DispatchQueue.main.async { [weak self] in
-                    self?.flutterChannel?.invokeMethod("onPurchaseDeferred", arguments: [
-                        "productId": transaction.payment.productIdentifier
-                    ])
-                }
-
-            case .purchasing:
-                DispatchQueue.main.async { [weak self] in
-                    self?.flutterChannel?.invokeMethod("onPurchaseInProgress", arguments: [
-                        "productId": transaction.payment.productIdentifier
-                    ])
-                }
-
-            @unknown default:
-                break
             }
         }
     }
 
-    private func fetchReceipt() -> String? {
-        guard let receiptURL = Bundle.main.appStoreReceiptURL,
-              let receiptData = try? Data(contentsOf: receiptURL) else { return nil }
-        return receiptData.base64EncodedString()
+    // MARK: - openSubscriptionSettings
+
+    private func handleOpenSubscriptionSettings(result: @escaping FlutterResult) {
+        guard let url = URL(string: "https://apps.apple.com/account/subscriptions") else {
+            result(FlutterError(code: "INVALID_URL", message: "Could not create URL", details: nil))
+            return
+        }
+        DispatchQueue.main.async {
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        }
+        result(true)
+    }
+
+    // MARK: - Helpers
+
+    /// Must be called on the main actor (FlutterMethodChannel is not thread-safe).
+    @MainActor
+    private func sendEvent(_ method: String, arguments: [String: Any]) {
+        flutterChannel?.invokeMethod(method, arguments: arguments)
     }
 }
