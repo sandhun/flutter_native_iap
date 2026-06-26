@@ -180,12 +180,17 @@ class NativeIapPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Purchas
                 purchases?.forEach { purchase ->
                     when (purchase.purchaseState) {
                         Purchase.PurchaseState.PURCHASED -> {
-                            scope.launch { handlePurchase(purchase) }
-                            activity?.runOnUiThread {
-                                channel?.invokeMethod("onPurchaseComplete", mapOf(
-                                    "productId" to purchase.products[0],
-                                    "purchaseToken" to purchase.purchaseToken
-                                ))
+                            // Guard: BillingClient re-delivers the purchase after acknowledgement.
+                            // Only emit onPurchaseComplete (and start acknowledgement) for the
+                            // initial unacknowledged delivery to avoid double events.
+                            if (!purchase.isAcknowledged) {
+                                scope.launch { handlePurchase(purchase) }
+                                activity?.runOnUiThread {
+                                    channel?.invokeMethod("onPurchaseComplete", mapOf(
+                                        "productId" to purchase.products[0],
+                                        "purchaseToken" to purchase.purchaseToken
+                                    ))
+                                }
                             }
                         }
                         Purchase.PurchaseState.PENDING -> {
@@ -250,7 +255,7 @@ class NativeIapPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Purchas
         productId: String,
         basePlanId: String,
         applicationUsername: String?
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): Boolean {
         val queryParams = QueryProductDetailsParams.newBuilder()
             .setProductList(
                 listOf(
@@ -262,9 +267,11 @@ class NativeIapPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Purchas
             )
             .build()
 
-        val (billingResult, productDetailsList) = suspendCoroutine<Pair<BillingResult, List<ProductDetails>>> { cont ->
-            billingClient.queryProductDetailsAsync(queryParams) { result, list ->
-                cont.resume(result to (list ?: emptyList()))
+        val (_, productDetailsList) = withContext(Dispatchers.IO) {
+            suspendCoroutine<Pair<BillingResult, List<ProductDetails>>> { cont ->
+                billingClient.queryProductDetailsAsync(queryParams) { result, list ->
+                    cont.resume(result to (list ?: emptyList()))
+                }
             }
         }
 
@@ -288,9 +295,12 @@ class NativeIapPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Purchas
             }
             .build()
 
-        val act = activity ?: throw Exception("Activity not available")
-        val flowResult = billingClient.launchBillingFlow(act, flowParams)
-        flowResult.responseCode == BillingClient.BillingResponseCode.OK
+        // launchBillingFlow must be called on the main thread.
+        return withContext(Dispatchers.Main) {
+            val act = activity ?: throw Exception("Activity not available")
+            val flowResult = billingClient.launchBillingFlow(act, flowParams)
+            flowResult.responseCode == BillingClient.BillingResponseCode.OK
+        }
     }
 
     private suspend fun purchaseSubscriptionOffer(
@@ -298,7 +308,7 @@ class NativeIapPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Purchas
         basePlanId: String,
         offerId: String,
         applicationUsername: String?
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): Boolean {
         val queryParams = QueryProductDetailsParams.newBuilder()
             .setProductList(
                 listOf(
@@ -310,9 +320,11 @@ class NativeIapPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Purchas
             )
             .build()
 
-        val (_, productDetailsList) = suspendCoroutine<Pair<BillingResult, List<ProductDetails>>> { cont ->
-            billingClient.queryProductDetailsAsync(queryParams) { result, list ->
-                cont.resume(result to (list ?: emptyList()))
+        val (_, productDetailsList) = withContext(Dispatchers.IO) {
+            suspendCoroutine<Pair<BillingResult, List<ProductDetails>>> { cont ->
+                billingClient.queryProductDetailsAsync(queryParams) { result, list ->
+                    cont.resume(result to (list ?: emptyList()))
+                }
             }
         }
 
@@ -336,9 +348,12 @@ class NativeIapPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Purchas
             }
             .build()
 
-        val act = activity ?: throw Exception("Activity not available")
-        val flowResult = billingClient.launchBillingFlow(act, flowParams)
-        flowResult.responseCode == BillingClient.BillingResponseCode.OK
+        // launchBillingFlow must be called on the main thread.
+        return withContext(Dispatchers.Main) {
+            val act = activity ?: throw Exception("Activity not available")
+            val flowResult = billingClient.launchBillingFlow(act, flowParams)
+            flowResult.responseCode == BillingClient.BillingResponseCode.OK
+        }
     }
 
     private suspend fun fetchProducts(productIds: List<String>): List<Map<String, Any?>> =
